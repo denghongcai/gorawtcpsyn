@@ -5,11 +5,9 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"flag"
 	"fmt"
-	"github.com/google/gopacket"
-	"github.com/google/gopacket/layers"
-	"github.com/google/gopacket/pcap"
 	"io"
 	"log"
 	"net"
@@ -17,6 +15,11 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/google/gopacket"
+	"github.com/google/gopacket/layers"
+	"github.com/google/gopacket/pcap"
+	"github.com/vishvananda/netlink"
 )
 
 // get the local ip based on our destination ip
@@ -37,8 +40,42 @@ func localIP(dstip net.IP) (net.IP, error) {
 	return net.IP{}, err
 }
 
+func localIPNet(localip net.IP) (net.IPNet, error) {
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return net.IPNet{}, err
+	}
+
+	for _, i := range interfaces {
+		addrs, err := i.Addrs()
+		if err != nil {
+			return net.IPNet{}, err
+		}
+		for _, a := range addrs {
+			ipnet, _ := a.(*net.IPNet)
+			if ipnet.IP.String() == localip.String() {
+				return *ipnet, nil
+			}
+		}
+	}
+	return net.IPNet{}, errors.New("not found")
+}
+
 // Sends an ARP request packet to determine the MAC address of an IP
 func remoteMac(dev string, srcmac net.HardwareAddr, srcip, dstip net.IP) (net.HardwareAddr, error) {
+	ipnet, ierr := localIPNet(srcip)
+	if ierr != nil {
+		return net.HardwareAddr{}, ierr
+	}
+
+	if !ipnet.Contains(dstip) {
+		routes, err := netlink.RouteGet(dstip)
+		if err != nil {
+			return net.HardwareAddr{}, err
+		}
+		dstip = routes[0].Gw
+	}
+
 	var dstmac net.HardwareAddr
 
 	eth := &layers.Ethernet{
@@ -72,7 +109,7 @@ func remoteMac(dev string, srcmac net.HardwareAddr, srcip, dstip net.IP) (net.Ha
 		return dstmac, err
 	}
 
-	handle, err := pcap.OpenLive(`rpcap://`+dev, 65535, true, time.Second*1)
+	handle, err := pcap.OpenLive(dev, 65535, true, time.Second*1)
 	if err != nil {
 		return dstmac, err
 	}
@@ -202,8 +239,8 @@ func main() {
 		Length:     20, // FIX
 		Id:         2,
 		Flags:      layers.IPv4DontFragment,
-		FragOffset: 0, //16384,
-		TTL:        3, //64,
+		FragOffset: 0,  //16384,
+		TTL:        64, //64,
 		Protocol:   layers.IPProtocolTCP,
 		Checksum:   0,
 		SrcIP:      srcip,
@@ -237,7 +274,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	handle, err := pcap.OpenLive(`rpcap://`+dev, 65535, true, time.Second*1)
+	handle, err := pcap.OpenLive(dev, 65535, true, time.Second*1)
 	if err != nil {
 		log.Fatal(err)
 	}
